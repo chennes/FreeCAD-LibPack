@@ -6,17 +6,21 @@
 # build script for each one.
 
 from diff_match_patch import diff_match_patch
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from enum import Enum
+import io
 import os
 import pathlib
 import platform
 import re
+import requests
 import shutil
 import subprocess
 import stat
 import sys
+import tempfile
+import zipfile
 
 
 class BuildMode(Enum):
@@ -191,6 +195,8 @@ class Compiler:
         if self.coin_cmake_path:
             base.append(f"-D Coin_DIR={self.coin_cmake_path}")
         if sys.platform.startswith("win32"):
+            if platform.machine() == "ARM64":
+                base.append("-A ARM64")
             inc_path = self.install_dir.replace("\\", "/")
             cxx_flags = f"/I{inc_path}/include /EHsc  /DWIN32 /DWIN64"
             if self.strict_mode:
@@ -211,6 +217,11 @@ class Compiler:
                 print(f"Building {item['name']}")
                 build_function = getattr(self, build_function_name)
                 build_function(item)
+                if item["name"].lower() == "python":
+                    # Check these even if we didn't actually have to build Python
+                    self._build_pip()
+                    if "requirements" in item:
+                        self._install_python_requirements(item["requirements"])
             else:
                 print(
                     f"No '{build_function_name}' found in compile_all.py -- "
@@ -234,14 +245,9 @@ class Compiler:
                 return
         if sys.platform.startswith("win32"):
             expected_exe_path = self.python_exe()
-            if self.skip_existing and os.path.exists(expected_exe_path):
-                print(
-                    "Not rebuilding, instead just using existing Python in the LibPack installation path"
-                )
-                return
+            arch = "x64" if platform.machine() == "AMD64" else "ARM64"
+            path = "amd64" if platform.machine() == "AMD64" else "arm64"
             try:
-                arch = "x64" if platform.machine() == "AMD64" else "ARM64"
-                path = "amd64" if platform.machine() == "AMD64" else "arm64"
                 subprocess.run(
                     [
                         self.init_script,
@@ -251,6 +257,7 @@ class Compiler:
                         arch,
                         "-c",
                         str(self.mode),
+                        "-e",
                     ],
                     check=True,
                     capture_output=True,
@@ -335,7 +342,7 @@ class Compiler:
                         if os.path.exists(target):
                             os.unlink(target)
                         file.rename(target)
-            pyconfig = os.path.join("PC", "pyconfig.h")
+            pyconfig = os.path.join("PCBuild", arch.lower(), "pyconfig.h")
             target = os.path.join(inc_dir, "pyconfig.h")
             if not os.path.exists(pyconfig):
                 print("ERROR: Could not locate pyconfig.h, cannot complete installation of Python")
@@ -346,11 +353,6 @@ class Compiler:
             shutil.copyfile(pyconfig, target)
         else:
             raise NotImplemented("Non-Windows compilation of Python is not implemented yet")
-
-        # Check these even if we didn't actually have to build Python
-        self._build_pip()
-        if "requirements" in args:
-            self._install_python_requirements(args["requirements"])
 
     def get_python_version(self, exe: str = None) -> str:
         if exe is None:
@@ -390,12 +392,35 @@ class Compiler:
             exit(1)
 
     def _install_python_requirements(self, requirements):
+        return
+        if platform.machine() == "ARM64" and sys.platform == "win32":
+            print("Detected Windows-on-ARM, downloading fallback wheels...")
+            fallback_wheels = self._get_windows_on_arm_fallback_wheels()
+        else:
+            fallback_wheels = None
         print("  Installing the following requirements (and their dependencies) using pip:")
+        final_requirements = []
         for req in requirements:
-            print("    " + req)
+            fallback = False
+            if fallback_wheels is not None:
+                new_req = self._get_fallback_wheel(req, fallback_wheels)
+                if new_req is not None:
+                    fallback = True
+                    final_requirements.append(new_req)
+                    print("    " + req + " (using ARM64 fallback wheel)")
+            if not fallback:
+                final_requirements.append(req)
+                print("    " + req)
         path_to_python = self.python_exe()
-        call_args = [path_to_python, "-m", "pip", "install", "--ignore-installed"]
-        call_args.extend(requirements)
+        call_args = [
+            path_to_python,
+            "-m",
+            "pip",
+            "install",
+            "--ignore-installed",
+            "--no-warn-script-location",
+        ]
+        call_args.extend(final_requirements)
         try:
             subprocess.run(
                 call_args,
@@ -408,6 +433,53 @@ class Compiler:
             if e.stderr:
                 print(e.stderr.decode("utf-8"))
             exit(1)
+
+    def _get_windows_on_arm_fallback_wheels(self) -> str:
+        """As of May 2025 SciPy does not yet provide a WOA wheel, so we have to use an "unofficial" build from
+        https://github.com/cgohlke/win_arm64-wheels"""
+        wheel_dir = os.path.join(self.base_dir, "woa-fallback-wheel")
+        if os.path.exists(wheel_dir):
+            if self.skip_existing:
+                print("Already downloaded Windows-on-ARM fallback wheels")
+                return wheel_dir
+            else:
+                shutil.rmtree(wheel_dir)
+        os.makedirs(wheel_dir)
+        zip_url = "https://github.com/cgohlke/win_arm64-wheels/releases/download/v2025.3.31/2025.3.31-experimental-cp313-win_arm64.whl.zip"
+        response = requests.get(zip_url)
+        if response.status_code != 200:
+            print("Failed to download Windows-on-ARM fallback Python requirements")
+            exit(1)
+
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zip_data:
+            for content_item in zip_data.infolist():
+                if content_item.is_dir():
+                    continue
+                filename = str(os.path.basename(content_item.filename))
+                if not filename:
+                    continue
+                target_path = os.path.join(wheel_dir, filename)
+                with open(target_path, "wb") as target_file:
+                    target_file.write(zip_data.read(content_item))
+            zip_data.extractall(path=wheel_dir)
+        return wheel_dir
+
+    @staticmethod
+    def _get_fallback_wheel(req: str, fallback_wheels: str) -> Optional[str]:
+        """See if a given requirement has a wheel in our fallback directory, and if so return
+        it. If not, just return the original requirement"""
+        package_name, _, version = req.partition("==")  # For now, completely ignore the version
+        filename = next(
+            (
+                f
+                for f in os.listdir(fallback_wheels)
+                if f.startswith(package_name) and f.endswith(".whl")
+            ),
+            None,
+        )
+        if filename is None:
+            return None
+        return os.path.join(fallback_wheels, filename)
 
     def build_qt(self, options: dict):
         """Doesn't really "build" Qt, just copies the pre-compiled libraries from the configured path"""
@@ -425,80 +497,17 @@ class Compiler:
         shutil.copytree(qt_dir, self.install_dir, dirs_exist_ok=True)
 
     def build_boost(self, _=None):
-        """Builds boost shared libraries and installs libraries and headers"""
-        if self.skip_existing:
-            self._configure_boost_version()
-            if self.boost_include_path is not None:
-                print("  Not rebuilding boost, it is already in the LibPack")
-                return
-
-        # NOTE: You can't build boost in-source twice, it will report an error the second time. So if you need to
-        # rebuild boost and you've already built it once, delete the entire Boost working directory, as well as the
-        # installed copy in the LibPack, then re-run this script. TODO: autodelete boost's build files
-
-        # Boost uses a custom build system and needs a config file to find our Python
-        with open(
-            os.path.join("tools", "build", "src", "user-config.jam"), "w", encoding="utf-8"
-        ) as user_config:
-            exe = self.python_exe()
-            if sys.platform.startswith("win32"):
-                exe = exe.replace("\\", "\\\\")
-            inc_dir = os.path.join(self.install_dir, "bin", "include").replace("\\", "\\\\")
-            lib_dir = os.path.join(self.install_dir, "bin", "libs").replace("\\", "\\\\")
-            python_version = self.get_python_version()
-            full_version = python_version + ("d" if self.mode == BuildMode.DEBUG else "")
-            print(f"  (boost-python is being built against Python {full_version})")
-            user_config.write(f"using python : {python_version} ")
-            user_config.write(f': "{exe}" ')
-            user_config.write(f': "{inc_dir}" ')
-            user_config.write(f': "{lib_dir}" ')
-            if self.mode == BuildMode.DEBUG:
-                user_config.write(f": <python-debugging>on ")
-            user_config.write(";\n")
-        try:
-            # When debugging on the command line, add --debug-configuration to get more verbose output
-            install_dir = self.install_dir
-            subprocess.run(
-                [self.init_script, "&", "bootstrap.bat", f"--prefix={install_dir}"],
-                capture_output=True,
-                check=True,
-            )
-            arch = "x86" if platform.machine() == "AMD64" else "arm"
-            subprocess.run(
-                [
-                    self.init_script,
-                    "&",
-                    "b2",
-                    f"install",
-                    "address-model=64",
-                    f"architecture={arch}",
-                    "link=static,shared",
-                    "cxxstd=20",
-                    str(self.mode).lower(),
-                    f"--prefix={install_dir}",
-                    "--layout=versioned",
-                    "--without-mpi",
-                    "--without-graph_parallel",
-                    "--build-type=complete",
-                    "--debug-configuration",
-                ],
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError as e:
-            # Boost is too verbose in its output to be of much use un-processed. Dump it all to a file, and
-            # then print only the lines with the word "error:" on them to stdout
+        extra_args = [
+            "-D BOOST_INSTALL_LAYOUT=versioned",
+            "-D BOOST_ENABLE_CMAKE=ON",
+            "-D BOOST_EXCLUDE_LIBRARIES='mpi;graph_parallel'",
+        ]
+        if platform.machine() == "ARM64" and sys.platform == "win32":
             print(
-                "Error: failed to build boost -- writing output to "
-                + os.path.join(os.path.curdir, "stdout.txt")
+                "  (NOTE: For Windows-on-ARM, Boost is being configured to use Windows Fibers in boost::context)"
             )
-            with open("stdout.txt", "w", encoding="utf-8") as f:
-                f.write(e.stdout.decode("utf-8"))
-            lines = e.stdout.decode("utf-8").split("\n")
-            for line in lines:
-                if "error:" in line.lower():
-                    print(line)
-            exit(e.returncode)
+            extra_args.append("-D BOOST_CONTEXT_IMPLEMENTATION=winfib")
+        self._build_standard_cmake(extra_args)
         self._configure_boost_version()
 
     def _configure_boost_version(self):
