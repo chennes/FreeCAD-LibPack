@@ -5,7 +5,7 @@
         {
             "name":"python",
             "git-repo":"https://github.com/python/cpython.git",
-            "git-ref":"v3.13.3",
+            "git-ref":"v3.13.5",
             "requirements": [
                 "annotated-types==0.7.0",
                 "anyio==4.9.0",
@@ -74,18 +74,21 @@
             "git-ref":"v1.3.1"
         },
         {
+            "name":"libpng",
+            "git-repo":"https://github.com/glennrp/libpng",
+            "git-ref":"v1.6.47"
+        },
+        {
             "name":"qt",
-            "install-directory":"C:\\Qt\\6.9.0\\msvc2022_arm64"
+            "install-directory":"C:\\Qt\\6.9.1\\msvc2022_x64",
+            "git-repo": "git://code.qt.io/qt/qt5.git",
+            "git-ref": "v6.9.1",
+            "fallback-build-dir": "C:\\temp"
         },
         {
             "name":"bzip2",
             "git-repo":"https://gitlab.com/bzip2/bzip2.git",
             "git-ref":"bzip2-1.0.8"
-        },
-        {
-            "name":"libpng",
-            "git-repo":"https://github.com/glennrp/libpng",
-            "git-ref":"v1.6.47"
         },
         {
             "name":"pybind11",
@@ -121,17 +124,17 @@
         {
             "name":"pivy",
             "git-repo":"https://github.com/coin3d/pivy",
-            "git-ref":"0.6.9",
-            "patches": ["patches/pivy-01-add-python-libraries.patch"]
+            "git-ref":"master"
         },
         {
             "name":"libclang",
-	    "url":"https://download.qt.io/development_releases/prebuilt/libclang/libclang-release_20.1.1-based-windows-vs2022_arm64.7z"
-	},
+	        "url-x64":"https://download.qt.io/development_releases/prebuilt/libclang/libclang-release_20.1.1-based-windows-vs2022_x64.7z",
+	        "url-ARM64":"https://download.qt.io/development_releases/prebuilt/libclang/libclang-release_20.1.1-based-windows-vs2022_arm64.7z"
+	    },
         {
             "name":"pyside",
             "git-repo": "http://code.qt.io/pyside/pyside-setup",
-            "git-ref": "6.9.0"
+            "git-ref": "6.9.1"
         },
         {
             "name":"vtk",
@@ -162,7 +165,8 @@
         {
             "name": "rapidjson",
             "git-repo":"https://github.com/Tencent/rapidjson",
-            "git-ref":"v1.1.0"
+            "git-ref":"master",
+            "note": "rapidjson doesn't do releases anymore, just live at head"
         },
         {
             "name":"eigen3",
@@ -178,8 +182,7 @@
         {
             "name":"netgen",
             "git-repo":"https://github.com/NGSolve/netgen",
-            "git-ref":"v6.2.2404",
-            "patches": ["patches/netgen-01-python-file-include-order.patch"]
+            "git-ref":"v6.2.2505"
         },
         {
             "name":"hdf5",
@@ -196,7 +199,8 @@
         {
             "name":"gmsh",
             "git-repo":"https://gitlab.onelab.info/gmsh/gmsh",
-            "git-ref":"gmsh_4_13_1"
+            "git-ref":"gmsh_4_13_1",
+            "patches": ["patches/gmsh-01-windows_stdint.patch"]
         },
         {
             "name":"pycxx",

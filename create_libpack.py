@@ -52,7 +52,7 @@ except ImportError:
 import compile_all
 
 path_to_7zip = "C:\\Program Files\\7-Zip\\7z.exe"
-path_to_bison = "C:\\Program Files\\win_flex_bison\\win_bison.exe"
+path_to_bison = "C:\\Program Files\\win-flex-bison\\win_bison.exe"
 devel_init_script = "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsarm64.bat"
 
 
@@ -129,6 +129,10 @@ def fetch_remote_data(config: dict, skip_existing: bool = False):
             exit()
         elif "url" in item:
             download(item["name"], item["url"])
+        elif "url-ARM64" in item and platform.machine() == "ARM64":
+            download(item["name"], item["url-ARM64"])
+        elif "url-x64" in item:
+            download(item["name"], item["url-x64"])
         else:
             # Just make the directory, presumably later code will know what to do
             os.makedirs(item["name"], exist_ok=True)

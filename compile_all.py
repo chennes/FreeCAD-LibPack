@@ -6,7 +6,7 @@
 # build script for each one.
 
 from diff_match_patch import diff_match_patch
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from enum import Enum
 import io
@@ -19,7 +19,6 @@ import shutil
 import subprocess
 import stat
 import sys
-import tempfile
 import zipfile
 
 
@@ -149,8 +148,6 @@ class Compiler:
             "-D CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=FALSE",  # Never use system packages, always use only the libpack
             "-D CMAKE_FIND_PACKAGE_NO_SYSTEM_PACKAGE_REGISTRY=TRUE",  # Same as above?
             "-D CMAKE_CXX_STANDARD=20",
-            "-T fortran=ifx",
-            "-D CMAKE_Fortran_COMPILER='C:/Program Files (x86)/Intel/oneAPI/compiler/2025.0/bin/ifx.exe'",  # Intel Fortran is called ifx now
             f"-D BISON_EXECUTABLE={self.bison_path}",
             f"-D BOOST_ROOT={self.install_dir}",
             "-D BUILD_DOC=No",
@@ -392,7 +389,10 @@ class Compiler:
             exit(1)
 
     def _install_python_requirements(self, requirements):
-        return
+        if self.skip_existing:
+            if os.path.exists(os.path.join(self.install_dir, "bin", "Lib", "site-packages", "PIL")):
+                print("  Not re-installing Python requirements, they are already in the LibPack")
+                return
         if platform.machine() == "ARM64" and sys.platform == "win32":
             print("Detected Windows-on-ARM, downloading fallback wheels...")
             fallback_wheels = self._get_windows_on_arm_fallback_wheels()
@@ -417,6 +417,7 @@ class Compiler:
             "-m",
             "pip",
             "install",
+            "--upgrade",
             "--ignore-installed",
             "--no-warn-script-location",
         ]
@@ -481,8 +482,83 @@ class Compiler:
             return None
         return os.path.join(fallback_wheels, filename)
 
+    def _build_qt_from_source(self, options: dict):
+        """Actually build Qt from source."""
+        if self.skip_existing:
+            if os.path.exists(os.path.join(self.install_dir, "metatypes")):
+                print("Not building Qt from source, it already seems to be in the LibPack")
+                return
+
+        build_dir = os.path.join(os.getcwd(), f"build-{str(self.mode).lower()}")
+        if len(build_dir) > 20:
+            print(
+                "  WARNING: Qt uses incredibly long path names which end up right at the very edge of what\n"
+                "  can be supported. In order to build successfully it might be necessary to use a very short\n"
+                '  path name for the actual build directory (e.g., "C:\\temp").\n'
+            )
+            if "fallback-build-dir" in options:
+                print(f"  Using fallback build directory {options['fallback-build-dir']}")
+                build_dir = options["fallback-build-dir"]
+            else:
+                print(
+                    f"  Attempting to use default path {build_dir}. \n\nIf the build fails, consider making a temp directory to work in.\n"
+                )
+
+        os.makedirs(build_dir, exist_ok=True)
+        old_cwd = os.getcwd()
+        os.chdir(build_dir)
+
+        # Qt needs access to zlib and libpng, and assumes they are installed at the system level. We want to
+        # use the LibPack versions. The easiest thing to do is just copy the DLLs:
+        files = ["zlib.dll", "zlib1.dll", "libpng16.dll"]
+        source = os.path.join(self.install_dir, "bin")
+        destination = os.path.join(build_dir, "qtbase", "bin")
+        os.makedirs(destination, exist_ok=True)
+        for f in files:
+            shutil.copy(os.path.join(source, f), destination)
+
+        submodules = ["qtbase", "qtsvg", "qtdeclarative", "qttools"]
+        init_command = [
+            self.init_script,
+            "&",
+            os.path.join(old_cwd, "configure.bat"),
+            "-opensource",
+            "-init-submodules",
+            "-submodules",
+            ",".join(submodules),
+            "-feature-opengl",
+            "-prefix",
+            self.install_dir,
+            "-opengl",
+            "desktop",
+        ]
+        try:
+            process = subprocess.run(init_command, check=True, capture_output=True)
+            with open("configure_log.txt", "a", encoding="utf-8") as f:
+                f.write(process.stdout.decode("utf-8"))
+        except subprocess.CalledProcessError as e:
+            print("ERROR: Qt configure failed!")
+            print(f"Command: {' '.join(init_command)}")
+            print(e.stdout.decode("utf-8"))
+            if e.stderr:
+                print(e.stderr.decode("utf-8"))
+            exit(e.returncode)
+
+        self._cmake_build()
+        self._cmake_install()
+        os.chdir(old_cwd)
+
     def build_qt(self, options: dict):
-        """Doesn't really "build" Qt, just copies the pre-compiled libraries from the configured path"""
+        """Doesn't really "build" Qt, just copies the pre-compiled libraries from the configured path,
+        unless running in Windows-on-ARM, in which case we *have* to build Qt from source in order to get
+        the OpenGL module"""
+        if (
+            "install-directory" not in options
+            or not os.path.exists(options["install-directory"])
+            or platform.machine() == "ARM64"
+        ):
+            self._build_qt_from_source(options)
+            return
         qt_dir = options["install-directory"]
         if self.skip_existing:
             if os.path.exists(os.path.join(self.install_dir, "metatypes")):
@@ -497,10 +573,23 @@ class Compiler:
         shutil.copytree(qt_dir, self.install_dir, dirs_exist_ok=True)
 
     def build_boost(self, _=None):
+        if self.skip_existing:
+            start_crawl_at = os.path.join(self.install_dir, "include")
+            contents = [
+                f
+                for f in os.listdir(start_crawl_at)
+                if os.path.isdir(os.path.join(start_crawl_at, f))
+            ]
+            for item in contents:
+                if item.startswith("boost"):
+                    print("  Not rebuilding boost, it is already in the LibPack")
+                    return
         extra_args = [
             "-D BOOST_INSTALL_LAYOUT=versioned",
             "-D BOOST_ENABLE_CMAKE=ON",
-            "-D BOOST_EXCLUDE_LIBRARIES='mpi;graph_parallel'",
+            "-D BOOST_EXCLUDE_LIBRARIES='mpi;graph_parallel;coroutine'",
+            "-D BOOST_ENABLE_PYTHON=ON",
+            "-D BOOST_LOCALE_ENABLE_ICU=OFF",
         ]
         if platform.machine() == "ARM64" and sys.platform == "win32":
             print(
@@ -630,7 +719,12 @@ class Compiler:
             if os.path.exists(os.path.join(self.install_dir, "include", "Quarter")):
                 print("  Not rebuilding Quarter, it is already in the LibPack")
                 return
-        self._build_standard_cmake()
+        extra_args = [
+            "-D QUARTER_BUILD_EXAMPLES=Off",
+            "-D QUARTER_USE_QT5=Off",
+            "-D QUARTER_USE_QT6=On",
+        ]
+        self._build_standard_cmake(extra_args=extra_args)
 
     def build_zlib(self, _=None):
         if self.skip_existing:
@@ -638,6 +732,18 @@ class Compiler:
                 print("  Not rebuilding zlib, it is already in the LibPack")
                 return
         self._build_standard_cmake()
+        # Qt really wants to find these under an alternate name, so just make copies...
+        name_mapping = [
+            (os.path.join("lib", "zlib.lib"), os.path.join("lib", "zlib1.lib")),
+            (os.path.join("bin", "zlib.dll"), os.path.join("bin", "zlib1.dll")),
+        ]
+        for name1, name2 in name_mapping:
+            full_name1 = os.path.join(self.install_dir, name1)
+            full_name2 = os.path.join(self.install_dir, name2)
+            if os.path.exists(full_name1) and not os.path.exists(full_name2):
+                shutil.copy(full_name1, full_name2)
+            elif os.path.exists(full_name2) and not os.path.exists(full_name1):
+                shutil.copy(full_name2, full_name1)
 
     def build_bzip2(self, _=None):
         """The version of BZip2 in widespread use (1.0.8, the most recent official release) do not yet use cMake"""
@@ -941,11 +1047,14 @@ class Compiler:
             f"-D 3RDPARTY_VTK_INCLUDE_DIRS={self._get_vtk_include_path()}",
             f"-D EIGEN_DIR={self.install_dir}/share/eigen3/cmake",
             "-D USE_VTK=On",
-            "-D USE_FREETYPE=On" "-D USE_RAPIDJSON=On",
-            "-D USE_EIGEN=On" "-D BUILD_CPP_STANDARD=C++17",
+            "-D USE_FREETYPE=On",
+            "-D USE_RAPIDJSON=On",
+            "-D USE_EIGEN=On",
+            "-D BUILD_CPP_STANDARD=C++17",
             "-D BUILD_RELEASE_DISABLE_EXCEPTIONS=OFF",
             "-D INSTALL_DIR_BIN=bin",
             "-D INSTALL_DIR_LIB=lib",
+            "-D CMAKE_POLICY_VERSION_MINIMUM=3.5",
         ]
         if self.mode == BuildMode.DEBUG:
             extra_args.append("-D BUILD_SHARED_LIBRARY_NAME_POSTFIX=d")
@@ -990,7 +1099,6 @@ class Compiler:
             f"-D CMAKE_FIND_ROOT_PATH={self.install_dir}",
             "-D USE_SUPERBUILD=OFF",
             "-D USE_GUI=OFF",
-            "-D USE_NATIVE_ARCH=OFF",
             "-D USE_INTERNAL_TCL=OFF",
             f"-D TCL_DIR={self.install_dir}",
             f"-D TK_DIR={self.install_dir}",
@@ -1033,8 +1141,8 @@ class Compiler:
         extra_args = []
         if sys.platform.startswith("win32"):
             extra_args = [
-                f"-D CMAKE_LIBRARY_PATH={self.install_dir}/win64/vc14/lib",  # TODO - Remove hardcoding
                 "-D ENABLE_OPENMP=No",
+                "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
             ]  # Build fails if OpenMP is enabled
         self._build_standard_cmake(extra_args)
 
@@ -1063,15 +1171,23 @@ class Compiler:
                 return
 
         os.chdir(os.path.join("icu4c", "source"))
+        if platform.machine() == "ARM64":
+            arch = "ARM64"
+        else:
+            arch = "x64"
         if sys.platform.startswith("win32"):
             os.chdir("allinone")
+            # Find the most recent available WindowsTargetPlatformVersion:
+            target_tuple = Compiler._get_latest_windows_target_platform_version()
+            target = f"{target_tuple[0]}.{target_tuple[1]}.{target_tuple[2]}.{target_tuple[3]}"
             args = [
                 self.init_script,
                 "&",
                 "msbuild",
                 f"/p:Configuration={str(self.mode).lower()}",
                 "/t:Build",
-                "/p:Platform=x64",  # TODO unhardcode
+                f"/p:Platform={arch}",
+                f"/p:WindowsTargetPlatformVersion={target}",
                 "/p:SkipUWP=true",
                 "allinone.sln",
             ]
@@ -1087,11 +1203,39 @@ class Compiler:
             bin_dir = os.path.join(self.install_dir, "bin")
             lib_dir = os.path.join(self.install_dir, "lib")
             inc_dir = os.path.join(self.install_dir, "include")
-            shutil.copytree(f"bin64", bin_dir, dirs_exist_ok=True)
-            shutil.copytree(f"lib64", lib_dir, dirs_exist_ok=True)
+            if sys.platform.startswith("win32"):
+                if platform.machine() == "ARM64":
+                    shutil.copytree(f"binARM64", bin_dir, dirs_exist_ok=True)
+                    shutil.copytree(f"libARM64", lib_dir, dirs_exist_ok=True)
+                else:
+                    shutil.copytree(f"bin64", bin_dir, dirs_exist_ok=True)
+                    shutil.copytree(f"lib64", lib_dir, dirs_exist_ok=True)
             shutil.copytree(f"include", inc_dir, dirs_exist_ok=True)
         else:
             raise NotImplemented("Non-Windows compilation of ICU is not implemented yet")
+
+    @staticmethod
+    def _get_latest_windows_target_platform_version() -> Optional[Tuple[int, int, int, int]]:
+        base_path = r"C:\Program Files (x86)\Windows Kits\10\Lib"
+        if not os.path.exists(base_path):
+            return None
+
+        version_dirs = []
+        version_pattern = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
+
+        for name in os.listdir(base_path):
+            full_path = os.path.join(base_path, name)
+            if os.path.isdir(full_path) and version_pattern.match(name):
+                version_dirs.append(name)
+
+        if not version_dirs:
+            return None
+
+        def version_key(v):
+            return [int(x) for x in v.split(".")]
+
+        latest_version = sorted(version_dirs, key=version_key)[-1]
+        return latest_version
 
     def build_xercesc(self, _: None):
         if self.skip_existing:
@@ -1125,7 +1269,7 @@ class Compiler:
             if os.path.exists(os.path.join(self.install_dir, "include", "yaml-cpp")):
                 print("  Not rebuilding yaml-cpp, it is already in the LibPack")
                 return
-        extra_args = ["-D YAML_BUILD_SHARED_LIBS=ON"]
+        extra_args = ["-D YAML_BUILD_SHARED_LIBS=ON", "-D CMAKE_POLICY_VERSION_MINIMUM=3.5"]
         self._build_standard_cmake(extra_args)
 
     def build_opencamlib(self, _: None):
@@ -1135,7 +1279,12 @@ class Compiler:
             ):
                 print("  Not rebuilding opencamlib, it is already in the LibPack")
                 return
-        extra_args = ["-D BUILD_CXX_LIB=OFF", "-D BUILD_PY_LIB=ON", "-D BUILD_DOC=OFF"]
+        extra_args = [
+            "-D BUILD_CXX_LIB=OFF",
+            "-D BUILD_PY_LIB=ON",
+            "-D BUILD_DOC=OFF",
+            "-D Boost_USE_STATIC_LIBS=OFF",
+        ]
         self._build_standard_cmake(extra_args)
 
     def build_calculix(self, _: None):
