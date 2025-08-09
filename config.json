@@ -63,7 +63,7 @@
                 "urllib3==2.4.0",
                 "uvicorn==0.34.2",
                 "vermin==1.6.0",
-                "watchfiles==1.0.5",
+                "watchfiles==1.1.0",
                 "websockets==15.0.1",
                 "wheel==0.45.1"
             ]
@@ -250,6 +250,33 @@
             "name": "googletest",
             "git-repo": "https://github.com/google/googletest",
             "git-ref": "main"
+        },
+        {
+            "name": "libxml2",
+            "git-repo": "https://gitlab.gnome.org/GNOME/libxml2",
+            "git-ref": "v2.14.5"
+        },
+        {
+            "name": "gmp",
+            "git-repo": "https://github.com/gx/gmp",
+            "git-ref": "6.1.2-2",
+            "note": "GMP uses Mercurial as their main SCM, so we use an unofficial GitHub mirror that is designed for Windows and CMake"
+        },
+        {
+            "name": "mpfr",
+            "git-repo": "https://gitlab.inria.fr/mpfr/mpfr.git",
+            "git-ref": "4.2.2"
+        },
+        {
+            "name": "cgal",
+            "git-repo": "https://github.com/CGAL/cgal",
+            "git-ref": "v5.6.2"
+        },
+        {
+            "name": "ifcopenshell",
+            "git-repo": "https://github.com/IfcOpenShell/IfcOpenShell",
+            "git-hash": "d49a3486b9f5d29029b5c57408b7eeb29036e389",
+            "patches": ["patches/ifcopenshell-01-invalid_ostream_character_class.patch"]
         }
     ]
 }

@@ -1,0 +1,9 @@
+@@@ src/ifcparse/IfcCharacterDecoder.cpp @@@
+@@ -11319,16 +11319,87 @@
+ %5C%5Cu%22 %3C%3C 
++std::hex %3C%3C std::setw(4) %3C%3C std::setfill('0') %3C%3C static_cast%3Cuint32_t%3E(
+ characte
+@@ -11391,32 +11391,33 @@
+ t32_t%3E(character
++)
+ ;%0A              

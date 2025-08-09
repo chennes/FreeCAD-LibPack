@@ -446,7 +446,7 @@ class Compiler:
             else:
                 shutil.rmtree(wheel_dir)
         os.makedirs(wheel_dir)
-        zip_url = "https://github.com/cgohlke/win_arm64-wheels/releases/download/v2025.3.31/2025.3.31-experimental-cp313-win_arm64.whl.zip"
+        zip_url = "https://github.com/cgohlke/win_arm64-wheels/releases/download/v2025.7.7/2025.7.7-experimental-cp313-win_arm64.whl.zip"
         response = requests.get(zip_url)
         if response.status_code != 200:
             print("Failed to download Windows-on-ARM fallback Python requirements")
@@ -584,6 +584,7 @@ class Compiler:
                 if item.startswith("boost"):
                     print("  Not rebuilding boost, it is already in the LibPack")
                     return
+
         extra_args = [
             "-D BOOST_INSTALL_LAYOUT=versioned",
             "-D BOOST_ENABLE_CMAKE=ON",
@@ -596,8 +597,64 @@ class Compiler:
                 "  (NOTE: For Windows-on-ARM, Boost is being configured to use Windows Fibers in boost::context)"
             )
             extra_args.append("-D BOOST_CONTEXT_IMPLEMENTATION=winfib")
-        self._build_standard_cmake(extra_args)
+
+        print("  Building shared Boost libraries...")
+        self._build_boost_shared(extra_args)
+
+        print("  Building static Boost libraries...")
+        self._build_boost_static(extra_args)
+
+    def _build_boost_shared(self, extra_args):
+        extra_args.extend(
+            [
+                "-D BUILD_SHARED_LIBS=ON",
+                "-D BUILD_STATIC_LIBS=OFF",
+                "-D Boost_BUILD_SHARED=ON",
+                "-D Boost_BUILD_STATIC=OFF",
+            ]
+        )
+
+        build_dir = "build-" + str(self.mode).lower() + "-shared"
+        if os.path.exists(build_dir):
+            shutil.rmtree(build_dir, onerror=remove_readonly)
+        os.mkdir(build_dir)
+        os.chdir(build_dir)
+
+        options = self.get_cmake_options()
+        options.extend(extra_args)
+        options.append("..")
+        self._run_cmake(options)
+        self._cmake_build()
+        self._cmake_install()
         self._configure_boost_version()
+
+        os.chdir("..")
+
+    def _build_boost_static(self, extra_args):
+        extra_args.extend(
+            [
+                "-D BUILD_SHARED_LIBS=OFF",
+                "-D BUILD_STATIC_LIBS=ON",
+                "-D Boost_BUILD_SHARED=OFF",
+                "-D Boost_BUILD_STATIC=ON",
+            ]
+        )
+
+        build_dir = "build-" + str(self.mode).lower() + "-static"
+        if os.path.exists(build_dir):
+            shutil.rmtree(build_dir, onerror=remove_readonly)
+        os.mkdir(build_dir)
+        os.chdir(build_dir)
+
+        options = self.get_cmake_options()
+        options.extend(extra_args)
+        options.append("..")
+        self._run_cmake(options)
+        self._cmake_build()
+        self._cmake_install()
+        self._configure_boost_version()
+
+        os.chdir("..")
 
     def _configure_boost_version(self):
         """Once Boost has been installed, figure out what version it was and set up the correct include path"""
@@ -1119,8 +1176,20 @@ class Compiler:
         extra_args = [
             f"-D ZLIB_INCLUDE_DIR={self.install_dir}/include",
             f"-D ZLIB_LIBRARY={self.install_dir}/lib/zlib.lib",
+            "-D HDF5_BUILD_CPP_LIB=On",
         ]
         self._build_standard_cmake(extra_args)
+
+        # HDF names its components, and doesn't install all headers if not explicitly told to:
+        cmake_install_options = [
+            "--install",
+            ".",
+            "--config",
+            str(self.mode).lower(),
+            "--component",
+            "cppheaders",
+        ]
+        self._run_cmake(cmake_install_options)
 
     def build_medfile(self, _: None):
         if self.skip_existing:
@@ -1178,8 +1247,7 @@ class Compiler:
         if sys.platform.startswith("win32"):
             os.chdir("allinone")
             # Find the most recent available WindowsTargetPlatformVersion:
-            target_tuple = Compiler._get_latest_windows_target_platform_version()
-            target = f"{target_tuple[0]}.{target_tuple[1]}.{target_tuple[2]}.{target_tuple[3]}"
+            target = Compiler._get_latest_windows_target_platform_version()
             args = [
                 self.init_script,
                 "&",
@@ -1215,7 +1283,7 @@ class Compiler:
             raise NotImplemented("Non-Windows compilation of ICU is not implemented yet")
 
     @staticmethod
-    def _get_latest_windows_target_platform_version() -> Optional[Tuple[int, int, int, int]]:
+    def _get_latest_windows_target_platform_version() -> Optional[str]:
         base_path = r"C:\Program Files (x86)\Windows Kits\10\Lib"
         if not os.path.exists(base_path):
             return None
@@ -1273,10 +1341,9 @@ class Compiler:
         self._build_standard_cmake(extra_args)
 
     def build_opencamlib(self, _: None):
+        install_prefix = os.path.join(self.install_dir, "bin", "Lib", "site-packages")
         if self.skip_existing:
-            if os.path.exists(
-                os.path.join(self.install_dir, "bin", "Lib", "site-packages", "opencamlib")
-            ):
+            if os.path.exists(os.path.join(install_prefix, "opencamlib")):
                 print("  Not rebuilding opencamlib, it is already in the LibPack")
                 return
         extra_args = [
@@ -1284,6 +1351,7 @@ class Compiler:
             "-D BUILD_PY_LIB=ON",
             "-D BUILD_DOC=OFF",
             "-D Boost_USE_STATIC_LIBS=OFF",
+            f"-D CMAKE_INSTALL_PREFIX={install_prefix}",
         ]
         self._build_standard_cmake(extra_args)
 
@@ -1322,3 +1390,128 @@ class Compiler:
         if sys.platform == "win32":
             extra_args.extend(["-D GTEST_FORCE_SHARED_CRT=ON", "-D GTEST_DISABLE_PTHREADS=ON"])
         self._build_standard_cmake(extra_args)
+
+    def build_libxml2(self, _: None):
+        if self.skip_existing:
+            if os.path.exists(os.path.join(self.install_dir, "include", "libxml2")):
+                print("  Not rebuilding libxml2, it is already in the LibPack")
+                return
+        extra_args = ["-D LIBXML2_WITH_ICONV=OFF"]
+        self._build_standard_cmake(extra_args)
+
+    def build_gmp(self, _: None):
+        if self.skip_existing:
+            if os.path.exists(os.path.join(self.install_dir, "include", "gmp.h")):
+                print("  Not rebuilding gmp, it is already in the LibPack")
+                return
+        # GMP doesn't really support CMake at all, but some kind soul on the internet is providing a GitHub
+        # mirror of their Mercurial repo that is designed for use with CMake and Visual Studio. However, it
+        # doesn't quite work right and appears basically unmaintained. Hack things to work.
+
+        self._cmake_create_build_dir()
+        options = self.get_cmake_options()
+        options.extend(["-G", "Visual Studio 17 2022"])
+        options.append("..")
+        self._run_cmake(options)
+
+        generators = [
+            "gen-fac",
+            "gen-fib",
+            "gen-bases",
+            "gen-jacobitab",
+            "gen-psqr",
+            "gen-trialdivtab",
+        ]
+
+        for generator in generators:
+            generator_build_options = [
+                self.init_script,
+                "&",
+                "msbuild",
+                f"{generator}.vcxproj",
+                f"/p:Configuration={self.mode}",
+            ]
+            try:
+                subprocess.run(generator_build_options, check=True, capture_output=True)
+            except subprocess.CalledProcessError as e:
+                print(f"Failed to build generator: {generator}")
+                print(e)
+                exit(1)
+
+        # Now our generators exist: run them. Alas, they take different options...
+
+        gen_fib_options = [f"bin\\{self.mode}\\gen-fib.exe", "header", "64", "0"]
+        try:
+            result = subprocess.run(gen_fib_options, check=True, capture_output=True)
+            with open("fib_table.h", "w") as fib_table:
+                fib_table.write(result.stdout.decode())
+        except subprocess.CalledProcessError:
+            print(f"Failed to run generator: {gen_fib_options}")
+            exit(1)
+
+        gen_fac_options = [f"bin\\{self.mode}\\gen-fac.exe", "64", "0"]
+        try:
+            subprocess.run(gen_fac_options, check=True, capture_output=True)
+            with open("fac_table.h", "w") as fib_table:
+                fib_table.write(result.stdout.decode())
+        except subprocess.CalledProcessError:
+            print(f"Failed to run generator: {gen_fac_options}")
+            exit(1)
+
+        gen_bases_options = [f"bin\\{self.mode}\\gen-bases.exe", "header", "64", "0"]
+        try:
+            subprocess.run(gen_bases_options, check=True, capture_output=True)
+            with open("mp_bases.h", "w") as fib_table:
+                fib_table.write(result.stdout.decode())
+        except subprocess.CalledProcessError:
+            print(f"Failed to run generator: {gen_bases_options}")
+            exit(1)
+        self._cmake_build()
+        self._cmake_install()
+
+    def build_mpfr(self, _: None):
+        if self.skip_existing:
+            if os.path.exists(os.path.join(self.install_dir, "include", "mpfr")):
+                print("  Not rebuilding MPFR, it is already in the LibPack")
+        # MPFR has no support of any kind for building with MSVC: it's a GNU package, and
+        # there don't appear to be any working CMake/MSVC build setups out there.
+        print("  NOTICE: MPFR BUILD SYSTEM NOT YET WRITTEN")
+
+    def build_cgal(self, _: None):
+        if self.skip_existing:
+            if os.path.exists(os.path.join(self.install_dir, "include", "cgal")):
+                print("  Not rebuilding CGAL, it is already in the LibPack")
+                return
+        self._build_standard_cmake()
+
+    def build_ifcopenshell(self, _: None):
+        """IfcOpenShell is a pain because they don't use a standard project structure, instead
+        placing their CMake files in a CMake subdirectory."""
+
+        self._cmake_create_build_dir()
+        options = self.get_cmake_options()
+        options.extend(
+            [
+                f"-D OCC_INCLUDE_DIR={self.install_dir}/inc",
+                f"-D HDF5_LIBRARY_DIR={self.install_dir}/lib",
+                f"-D HDF5_INCLUDE_DIR={self.install_dir}/include",
+                f"-D EIGEN_DIR={self.install_dir}/include/eigen3",
+                "-D BUILD_IFCGEOM=ON",
+                "-D WITH_CGAL=OFF",
+                "-D COLLADA_SUPPORT=OFF",
+                "-D BUILD_SHARED_LIBS=OFF",
+                "-D MSVC_PARALLEL_BUILD=ON",
+            ]
+        )
+
+        # -DCGAL_INCLUDE_DIR=/usr/include \
+        # -DGMP_INCLUDE_DIR=/usr/include \
+        # -DMPFR_INCLUDE_DIR=/usr/include \
+        # -DGMP_LIBRARY_DIR=/usr/lib/x86_64-linux-gnu \
+        # -DMPFR_LIBRARY_DIR=/usr/lib/x86_64-linux-gnu \
+        # -DJSON_INCLUDE_DIR=/usr/include \
+        # -DEIGEN_DIR=/usr/include/eigen3
+        options.append("../cmake/")
+        self._run_cmake(options)
+        self._cmake_build()
+        self._cmake_install()
